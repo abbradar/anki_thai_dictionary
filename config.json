@@ -1,0 +1,7 @@
+{
+    "id_field": "Id",
+    "word_field": = "Word",
+    "definition_field": "Definition",
+    "extra_field": "Extra",
+    "pronounciation_type": "Paiboon"
+}
