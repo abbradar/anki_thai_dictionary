@@ -1,4 +1,4 @@
-## thai-dictionary
+## Anki thai-dictionary.com Addon
 
 ### WARNING
 
