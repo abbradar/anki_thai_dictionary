@@ -1,4 +1,3 @@
-from copy import copy
 import os
 import logging
 import glob
@@ -15,11 +14,11 @@ from anki.collection import Collection
 import aqt
 from aqt.editor import EditorWebView, Editor
 from aqt.qt import QMenu, qconnect
-from aqt.operations import CollectionOp, OpChanges
+from aqt.operations import QueryOp, CollectionOp, OpChanges
 
-from .thai_dictionary.types import *
-from .thai_dictionary.fetch import DictionaryFetcher, EntryNotFound, build_entry_url, parse_entry_url
-from .thai_dictionary.note import MediaName, NoteFormatter, WordNote
+from .thai_language.types import *
+from .thai_language.fetch import DictionaryFetcher, EntryNotFound, build_entry_url, parse_entry_url
+from .thai_language.note import MediaName, NoteFormatter, WordNote
 
 
 logger = logging.getLogger(__name__)
@@ -141,7 +140,7 @@ class Plugin:
         editor = editor_webview.editor
         if editor.note is None or self._config.id_field not in editor.note:
             return
-        menu.addSection("thai-dictionary.con")
+        menu.addSection("thai-language.com")
 
         action = menu.addAction(_("Fill supported fields"))
         qconnect(action.triggered, lambda: self._fetch_and_fill(editor))
@@ -184,7 +183,7 @@ class Plugin:
         if self._config.extra_field in note and (fields is None or self._config.extra_field in fields):
             note[self._config.extra_field] = word_note.extra
 
-    def _fill_single_note(self, col: Collection, note: Note, fields: Optional[set[str]] = None) -> OpChanges:
+    def _get_single_note(self, col: Collection, note: Note) -> AnkiWordNote:
         assert aqt.mw is not None
         mw = aqt.mw
 
@@ -206,10 +205,18 @@ class Plugin:
                 max=2,
             )
         )
-        pos = col.add_custom_undo_entry(_("thai-dictionary: Fill note"))
+        return word_note
+
+    def _fill_single_note(self, col: Collection, note: Note, fields: Optional[set[str]] = None) -> OpChanges:
+        word_note = self._get_single_note(col, note)
+        pos = col.add_custom_undo_entry(_("thai-language.com: Fill note"))
         self._update_note(col, note, word_note, fields)
         col.update_note(note)
         return col.merge_undo_entries(pos)
+
+    def _fill_single_new_note(self, col: Collection, note: Note, fields: Optional[set[str]] = None):
+        word_note = self._get_single_note(col, note)
+        self._update_note(col, note, word_note, fields)
 
     def _fill_model_notes(self, col: Collection, model_id: NotetypeId, fields: Optional[set[str]] = None) -> OpChanges:
         assert aqt.mw is not None
@@ -220,7 +227,7 @@ class Plugin:
                 label=_("Searching for cards"),
             )
         )
-        pos = col.add_custom_undo_entry(_("thai-dictionary: Fill suitable notes"))
+        pos = col.add_custom_undo_entry(_("thai-language.com: Fill suitable notes"))
         all_nids = col.models.nids(model_id)
         total = len(all_nids)
         processed_notes = []
@@ -265,13 +272,24 @@ class Plugin:
     def _fetch_and_fill(self, editor: Editor, fields: Optional[set[str]] = None):
         assert editor.note is not None
         note = editor.note
-        op = CollectionOp(
-            parent=editor.parentWindow,
-            op=lambda col: self._fill_single_note(col, note, fields),
-        )
-        op \
-            .failure(lambda e: _handle_failure(editor, e)) \
-            .run_in_background()
+        # Ugh.
+        if not editor.addMode:
+            cop = CollectionOp(
+                parent=editor.parentWindow,
+                op=lambda col: self._fill_single_note(col, note, fields),
+            )
+            cop \
+                .failure(lambda e: _handle_failure(editor, e)) \
+                .run_in_background()
+        else:
+            qop = QueryOp(
+                parent=editor.parentWindow,
+                op=lambda col: self._fill_single_new_note(col, note, fields),
+                success=lambda _: editor.loadNoteKeepingFocus(),
+            )
+            qop \
+                .failure(lambda e: _handle_failure(editor, e)) \
+                .run_in_background()
 
     def _fetch_and_fill_all(self, editor: Editor, fields: Optional[set[str]] = None):
         if not aqt.utils.askUser(

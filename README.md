@@ -1,8 +1,8 @@
-## Anki thai-dictionary.com Addon
+## Anki thai-language.com Addon
 
 ### WARNING
 
-I have tried contacting thai-dictionary.com owners and ask their opinion of publishing this, but have received no reply. While I believe that scrapping dictionary entries for building *personal* decks falls under fair use, I'm not a lawyer.
+I have tried contacting thai-language.com owners and ask their opinion of publishing this, but have received no reply. While I believe that scrapping dictionary entries for building *personal* decks falls under fair use, I'm not a lawyer.
 
 ### Manual
 
@@ -27,4 +27,4 @@ After this add-on has been installed, the following new context menu options app
 
 ### Customization
 
-To change the notes formatting or add/remove details you can edit or derive from the [`NoteFormatter` class](https://github.com/abbradar/anki_thai_dictionary/blob/master/thai_dictionary/note.py). It contains a multitude of methods for formatting various parts of a note, which may be overridden.
+To change the notes formatting or add/remove details you can edit or derive from the [`NoteFormatter` class](https://github.com/abbradar/anki_thai_language/blob/master/thai_language/note.py). It contains a multitude of methods for formatting various parts of a note, which may be overridden.

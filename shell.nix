@@ -12,7 +12,7 @@ let
   }).python310;
 
 in python.pkgs.buildPythonPackage {
-  name = "thai_dictionary";
+  name = "anki_thai_language";
 
   propagatedBuildInputs = with python.pkgs; [
     anki

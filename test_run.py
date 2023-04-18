@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-from thai_dictionary.types import *
-from thai_dictionary.fetch import DictionaryFetcher
-from thai_dictionary.note import NoteFormatter
+from thai_language.types import *
+from thai_language.fetch import DictionaryFetcher
+from thai_language.note import NoteFormatter
 
 fetcher = DictionaryFetcher()
 formatter = NoteFormatter(fetcher)
