@@ -288,6 +288,7 @@ class Plugin:
                 success=lambda _: editor.loadNoteKeepingFocus(),
             )
             qop \
+                .with_progress(_("Filling the dictionary entry")) \
                 .failure(lambda e: _handle_failure(editor, e)) \
                 .run_in_background()
 
