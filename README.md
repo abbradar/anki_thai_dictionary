@@ -6,6 +6,8 @@ I have tried contacting thai-dictionary.com owners and ask their opinion of publ
 
 ### Manual
 
+[AnkiWeb page](https://ankiweb.net/shared/info/384983123)
+
 This add-on requires that your model has these fields:
 * "Id": required, used for linking notes to their dictionary entries;
 * "Word": optional, the word. Currently filled with Paiboon transliteration, but this can be changed by editing the configuration or the source code a bit (see below);
