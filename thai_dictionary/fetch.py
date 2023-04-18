@@ -478,7 +478,8 @@ class DictionaryFetcher:
                 raise EntryNotFound(f"Dictionary entry {id} does not exist")
             r.raise_for_status()
 
-            soup = BeautifulSoup(r.text, "lxml")
+            # We are forced to; otherwise, we need to bundle html5lib with Anki.
+            soup = BeautifulSoup(r.text, "html.parser")
             entry_tag = _get_single(soup, "div", id="old-content")
             link_tag = _get_single(soup, "link", rel="canonical", href=True)
             real_ref = parse_entry_url(link_tag.attrs["href"])
