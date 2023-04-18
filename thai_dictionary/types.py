@@ -48,7 +48,9 @@ def _parse_components(raw: Optional[list[Union[dict[str, Any], Literal["self"]]]
         return None
 
 
-@dataclass(kw_only=True)
+# FIXME: Replace when Anki ships with Python 3.10
+# @dataclass(kw_only=True)
+@dataclass
 class EntryDefinition:
     id: DefinitionId
     definition: str
@@ -75,7 +77,9 @@ class EntryDefinition:
         return dataclasses.asdict(self)
 
 
-@dataclass(kw_only=True)
+# FIXME: Replace when Anki ships with Python 3.10
+# @dataclass(kw_only=True)
+@dataclass
 class DictionaryEntry:
     id: EntryId
     entry: str

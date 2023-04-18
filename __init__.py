@@ -29,7 +29,9 @@ class AnkiEntryNotFound(Exception):
     pass
 
 
-@dataclass(kw_only=True)
+# FIXME: Replace when Anki ships with Python 3.10
+# @dataclass(kw_only=True)
+@dataclass
 class AnkiWordNote(WordNote):
     media_data: dict[MediaName, bytes] = field(default_factory=dict)
 

@@ -23,7 +23,9 @@ MediaPath = str
 MediaName = str
 
 
-@dataclass(kw_only=True)
+# FIXME: Replace when Anki ships with Python 3.10
+# @dataclass(kw_only=True)
+@dataclass
 class WordNote:
     ref: EntryRef
     word: str
@@ -32,8 +34,9 @@ class WordNote:
     media: dict[MediaName, MediaPath] = field(default_factory=dict)
 
 
+# FIXME: Replace when Anki ships with Python 3.10
+# @dataclass(kw_only=True)
 @dataclass
-@dataclass(kw_only=True)
 class WordComponent:
     id: EntryId
     definition: DefinitionId
