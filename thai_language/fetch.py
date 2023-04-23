@@ -48,7 +48,7 @@ def _get_first(tag: Tag, *args, **kwargs) -> Tag:
     return r
 
 
-_ENTRY_URL_REGEX = re.compile(r"(?:(?:(?:https?://)(?:www\.)?thai-language\.com)?/id/(?P<id>[0-9]+))?(?:#def(?P<def>[0-9]+[^?]*))?")
+_ENTRY_URL_REGEX = re.compile(r"(?:(?:(?:https?://)?(?:www\.)?thai-language\.com)?/id/(?P<id>[0-9]+))?(?:#def(?P<def>[0-9]+[^?]*))?")
 
 def parse_entry_url(url: str, self_id: Optional[EntryId] = None) -> Optional[EntryRef]:
     m = _ENTRY_URL_REGEX.fullmatch(url)
