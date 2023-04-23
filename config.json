@@ -3,5 +3,8 @@
     "word_field": = "Word",
     "definition_field": "Definition",
     "extra_field": "Extra",
+    "cloze_ids_field": "Ids",
+    "cloze_text_field": "Text",
+    "cloze_extra_field": "Extra",
     "pronounciation_type": "Paiboon"
 }

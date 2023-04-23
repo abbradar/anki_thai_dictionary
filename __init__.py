@@ -1,3 +1,5 @@
+import enum
+from enum import Enum
 import os
 import logging
 import glob
@@ -17,8 +19,9 @@ from aqt.qt import QMenu, qconnect
 from aqt.operations import QueryOp, CollectionOp, OpChanges
 
 from .thai_language.types import *
-from .thai_language.fetch import DictionaryFetcher, EntryNotFound, build_entry_url, parse_entry_url
-from .thai_language.note import MediaName, NoteFormatter, WordNote
+from .thai_language.fetch import DictionaryFetcher, EntryNotFound, build_entry_url
+from .thai_language.refs import parse_any_ref, ref_to_string
+from .thai_language.note import ClozeNote, MediaName, NoteFormatter, WordNote
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,11 @@ logger = logging.getLogger(__name__)
 
 class AnkiEntryNotFound(Exception):
     pass
+
+
+class NoteType(Enum):
+    ENTRY = enum.auto()
+    CLOZE = enum.auto()
 
 
 # FIXME: Replace when Anki ships with Python 3.10
@@ -41,6 +49,9 @@ class PluginOptions:
     word_field: str = "Word"
     definition_field: str = "Definition"
     extra_field: str = "Extra"
+    cloze_ids_field: str = "Ids"
+    cloze_text_field: str = "Text"
+    cloze_extra_field: str = "Extra"
     pronounciation_type: str = "Paiboon"
 
     @staticmethod
@@ -49,22 +60,6 @@ class PluginOptions:
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
-
-
-def parse_ref(raw_ref: str) -> Optional[EntryRef]:
-    try:
-        id_parts = raw_ref.split("#", maxsplit=1)
-        defn = None if len(id_parts) < 2 else id_parts[1]
-        return EntryRef(int(id_parts[0]), defn)
-    except (ValueError, IndexError):
-        return None
-
-
-def ref_to_string(ref: EntryRef) -> str:
-    if ref.definition is None:
-        return str(ref.id)
-    else:
-        return f"{ref.id}#{ref.definition}"
 
 
 def _handle_failure(editor: Editor, e: Exception):
@@ -113,67 +108,73 @@ class Plugin:
         self._config = PluginOptions()
         aqt.mw.addonManager.writeConfig(__name__, self._config.to_dict())
 
-    def _get_id(self, note: Note) -> str:
-        return note[self._config.id_field].strip()
-
-    def _parse_id(self, raw_id: str) -> Optional[EntryRef]:
-        strip_id = strip_html(raw_id)
-
-        if raw_id == "":
+    def _find_note_type(self, note: Note) -> Optional[NoteType]:
+        if self._config.id_field in note:
+            return NoteType.ENTRY
+        elif self._config.cloze_ids_field in note:
+            return NoteType.CLOZE
+        else:
             return None
 
-        maybe_ref = parse_ref(strip_id)
-        if maybe_ref is not None:
-            return maybe_ref
-
-        maybe_ref = parse_entry_url(strip_id)
-        if maybe_ref is not None:
-            return maybe_ref
-
-        maybe_ref = self._fetcher.lookup_word(strip_id)
-        if maybe_ref is not None:
-            return maybe_ref
-
-        return None
+    def _get_note_type(self, note: Note) -> NoteType:
+        note_type = self._find_note_type(note)
+        if note_type is None:
+            raise RuntimeError("Unknown note type")
+        return note_type
 
     def _on_context_menu(self, editor_webview: EditorWebView, menu: QMenu):
         editor = editor_webview.editor
-        if editor.note is None or self._config.id_field not in editor.note:
+        if editor.note is None or self._find_note_type(editor.note) is None:
             return
+
         menu.addSection("thai-language.com")
 
         action = menu.addAction(_("Fill supported fields"))
-        qconnect(action.triggered, lambda: self._fetch_and_fill(editor))
+        qconnect(action.triggered, lambda: self._update(editor))
 
         action = menu.addAction(_("Fill this field"))
         action.setEnabled(editor.currentField is not None)
-        qconnect(action.triggered, lambda: self._fetch_and_fill_current(editor))
+        qconnect(action.triggered, lambda: self._update_current(editor))
 
         action = menu.addAction(_("Fill this field in all notes"))
         action.setEnabled(editor.currentField is not None)
-        qconnect(action.triggered, lambda: self._fetch_and_fill_current_all(editor))
+        qconnect(action.triggered, lambda: self._update_current_model(editor))
 
-    def _get_note_by_id(self, col: Collection, raw_id: str) -> Optional[AnkiWordNote]:
+        action = menu.addAction(_("Cache this field"))
+        qconnect(action.triggered, lambda: self._fetch(editor))
+
+        action = menu.addAction(_("Cache all notes"))
+        qconnect(action.triggered, lambda: self._fetch_model(editor))
+
+    def _fetch_entry_note(self, col: Collection, note: Note) -> AnkiWordNote:
+        raw_id = strip_html(note[self._config.id_field]).strip()
+
         with self._fetcher_lock:
             formatter = NoteFormatter(self._fetcher, pronounciation_type=self._config.pronounciation_type)
-            id = self._parse_id(raw_id)
-            if id is None:
-                return None
+            refs = parse_any_ref(self._fetcher, raw_id)
+            if len(refs) == 0:
+                raise AnkiEntryNotFound()
             try:
-                note = formatter.entry_to_note(id)
+                word_note = formatter.entry_to_note(refs[0])
+
                 media_data: dict[MediaName, bytes] = {}
-                for name, path in note.media.items():
+                for name, path in word_note.media.items():
                     if not col.media.have(name):
                         file_data = self._fetcher.get_media_data(path)
                         media_data[name] = file_data
-                return AnkiWordNote(**note.__dict__, media_data=media_data)
+                return AnkiWordNote(**word_note.__dict__, media_data=media_data)
             except EntryNotFound:
-                return None
+                raise AnkiEntryNotFound()
 
-    def _update_note(self, col: Collection, note: Note, word_note: AnkiWordNote, fields: Optional[set[str]] = None):
+    def _update_entry_note(self, col: Collection, note: Note, *, fields: Optional[set[str]] = None, on_fetch: Optional[Callable[[], None]] = None):
+        word_note = self._fetch_entry_note(col, note)
+
         for name, data in word_note.media_data.items():
             new_name = col.media.write_data(name, data)
             assert name == new_name
+
+        if on_fetch:
+            on_fetch()
 
         note[self._config.id_field] = f'<a href="{build_entry_url(word_note.ref)}">{ref_to_string(word_note.ref)}</a>'
         if self._config.word_field in note and (fields is None or self._config.word_field in fields):
@@ -183,100 +184,163 @@ class Plugin:
         if self._config.extra_field in note and (fields is None or self._config.extra_field in fields):
             note[self._config.extra_field] = word_note.extra
 
-    def _get_single_note(self, col: Collection, note: Note) -> AnkiWordNote:
+    def _fetch_cloze_note(self, col: Collection, note: Note) -> ClozeNote:
+        id_cloze = note[self._config.cloze_ids_field].strip()
+
+        with self._fetcher_lock:
+            formatter = NoteFormatter(self._fetcher, pronounciation_type=self._config.pronounciation_type)
+            return formatter.cloze_to_note(id_cloze)
+
+    def _update_cloze_note(self, col: Collection, note: Note, *, fields: Optional[set[str]] = None, on_fetch: Optional[Callable[[], None]] = None):
+        cloze_note = self._fetch_cloze_note(col, note)
+
+        if on_fetch:
+            on_fetch()
+
+        note[self._config.cloze_ids_field] = cloze_note.id_cloze
+        if self._config.cloze_text_field in note and (fields is None or self._config.cloze_text_field in fields):
+            note[self._config.cloze_text_field] = cloze_note.cloze
+        if self._config.cloze_extra_field in note and (fields is None or self._config.cloze_extra_field in fields):
+            note[self._config.cloze_extra_field] = cloze_note.extra
+
+    def _fetch_note(self, col: Collection, note: Note, type: NoteType):
+        if type == NoteType.ENTRY:
+            self._fetch_entry_note(col, note)
+        elif type == NoteType.CLOZE:
+            self._fetch_cloze_note(col, note)
+        else:
+            raise RuntimeError("Impossible NoteType")
+
+    def _update_note(self, col: Collection, note: Note, type: NoteType, *, fields: Optional[set[str]] = None, on_fetch: Optional[Callable[[], None]] = None):
+        if type == NoteType.ENTRY:
+            self._update_entry_note(col, note, fields=fields, on_fetch=on_fetch)
+        elif type == NoteType.CLOZE:
+            self._update_cloze_note(col, note, fields=fields, on_fetch=on_fetch)
+        else:
+            raise RuntimeError("Impossible NoteType")
+
+    def _fetch_single_note_proc(self, col: Collection, note: Note):
+        note_type = self._get_note_type(note)
+        self._fetch_note(col, note, note_type)
+
+    def _fetch_model_notes_proc(self, col: Collection, model_id: NotetypeId):
         assert aqt.mw is not None
         mw = aqt.mw
 
-        raw_id = note[self._config.id_field].strip()
         mw.taskman.run_on_main(
             lambda: mw.progress.update(
-                label=_("Fetching the dictionary entry"),
-                value=0,
-                max=2,
+                label=_("Searching for model notes"),
             )
         )
-        word_note = self._get_note_by_id(col, raw_id)
-        if word_note is None:
-            raise AnkiEntryNotFound()
-        mw.taskman.run_on_main(
-            lambda: mw.progress.update(
-                label=_("Fetching the media files"),
-                value=1,
-                max=2,
+        all_nids = col.models.nids(model_id)
+        total = len(all_nids)
+        note_type = None
+        for i, note_id in enumerate(all_nids):
+            note = col.get_note(note_id)
+            if note_type is None:
+                note_type = self._get_note_type(note)
+            mw.taskman.run_on_main(
+                lambda: mw.progress.update(
+                    label=_("Updating note {} of {}").format(i + 1, total),
+                    value=i,
+                    max=total,
+                )
             )
-        )
-        return word_note
+            try:
+                self._fetch_note(col, note, note_type)
+            except AnkiEntryNotFound:
+                pass
 
-    def _fill_single_note(self, col: Collection, note: Note, fields: Optional[set[str]] = None) -> OpChanges:
-        word_note = self._get_single_note(col, note)
-        pos = col.add_custom_undo_entry(_("thai-language.com: Fill note"))
-        self._update_note(col, note, word_note, fields)
+    def _update_single_note_proc(self, col: Collection, note: Note, fields: Optional[set[str]] = None) -> OpChanges:
+        assert aqt.mw is not None
+        mw = aqt.mw
+
+        mw.taskman.run_on_main(
+            lambda: mw.progress.update(
+                label=_("Updating the note"),
+            )
+        )
+        pos: Optional[int] = None
+        def on_fetch():
+            nonlocal pos
+            pos = col.add_custom_undo_entry(_("thai-language.com: Update the note"))
+        self._update_note(col, note, self._get_note_type(note), fields=fields, on_fetch=on_fetch)
+        assert pos is not None
         col.update_note(note)
         return col.merge_undo_entries(pos)
 
-    def _fill_single_new_note(self, col: Collection, note: Note, fields: Optional[set[str]] = None):
-        word_note = self._get_single_note(col, note)
-        self._update_note(col, note, word_note, fields)
+    def _update_single_new_note_proc(self, col: Collection, note: Note, fields: Optional[set[str]] = None):
+        self._update_note(col, note, self._get_note_type(note), fields=fields)
 
-    def _fill_model_notes(self, col: Collection, model_id: NotetypeId, fields: Optional[set[str]] = None) -> OpChanges:
+    def _update_model_notes_proc(self, col: Collection, model_id: NotetypeId, fields: Optional[set[str]] = None) -> OpChanges:
         assert aqt.mw is not None
         mw = aqt.mw
 
         mw.taskman.run_on_main(
             lambda: mw.progress.update(
-                label=_("Searching for cards"),
+                label=_("Searching for model notes"),
             )
         )
-        pos = col.add_custom_undo_entry(_("thai-language.com: Fill suitable notes"))
+        pos = col.add_custom_undo_entry(_("thai-language.com: Update the model notes"))
         all_nids = col.models.nids(model_id)
         total = len(all_nids)
         processed_notes = []
+        note_type = None
         for i, note_id in enumerate(all_nids):
             note = col.get_note(note_id)
-            raw_id = note[self._config.id_field].strip()
+            if note_type is None:
+                note_type = self._get_note_type(note)
             mw.taskman.run_on_main(
                 lambda: mw.progress.update(
-                    label=_("Downloading entry {} of {}").format(i + 1, total),
-                    value=2 * i,
-                    max=2 * total,
+                    label=_("Updating note {} of {}").format(i + 1, total),
+                    value=i,
+                    max=total,
                 )
             )
-            word_note = self._get_note_by_id(col, raw_id)
-            if word_note is not None:
-                mw.taskman.run_on_main(
-                    lambda: mw.progress.update(
-                        label=_("Downloading entry {} of {}").format(i + 1, total),
-                        value=2 * i + 1,
-                        max=2 * total,
-                    )
-                )
-                self._update_note(col, note, word_note, fields)
+            try:
+                self._update_note(col, note, note_type, fields=fields)
                 processed_notes.append(note)
+            except AnkiEntryNotFound:
+                pass
         col.update_notes(processed_notes)
         return col.merge_undo_entries(pos)
 
-    def _fetch_and_fill_current(self, editor: Editor):
-        if editor.currentField is None:
-            return
+    def _fetch(self, editor: Editor):
         assert editor.note is not None
-        field = editor.note.keys()[editor.currentField]
-        self._fetch_and_fill(editor, set([field]))
+        note = editor.note
+        qop = QueryOp(
+            parent=editor.parentWindow,
+            op=lambda col: self._fetch_single_note_proc(col, note),
+            success=lambda _: None,
+        )
+        qop \
+            .with_progress(_("Fetching the note")) \
+            .failure(lambda e: _handle_failure(editor, e)) \
+            .run_in_background()
 
-    def _fetch_and_fill_current_all(self, editor: Editor):
-        if editor.currentField is None:
-            return
+    def _fetch_model(self, editor: Editor):
         assert editor.note is not None
-        field = editor.note.keys()[editor.currentField]
-        self._fetch_and_fill_all(editor, set([field]))
+        notetype = editor.note.note_type()
+        assert notetype is not None
+        model_id: NotetypeId = notetype["id"]
+        qop = QueryOp(
+            parent=editor.parentWindow,
+            op=lambda col: self._fetch_model_notes_proc(col, model_id),
+            success=lambda _: None,
+        )
+        qop \
+            .with_progress(_("Fetching the model notes")) \
+            .failure(lambda e: _handle_failure(editor, e)) \
+            .run_in_background()
 
-    def _fetch_and_fill(self, editor: Editor, fields: Optional[set[str]] = None):
+    def _update(self, editor: Editor, fields: Optional[set[str]] = None):
         assert editor.note is not None
         note = editor.note
         # Ugh.
         if not editor.addMode:
             cop = CollectionOp(
                 parent=editor.parentWindow,
-                op=lambda col: self._fill_single_note(col, note, fields),
+                op=lambda col: self._update_single_note_proc(col, note, fields),
             )
             cop \
                 .failure(lambda e: _handle_failure(editor, e)) \
@@ -284,15 +348,15 @@ class Plugin:
         else:
             qop = QueryOp(
                 parent=editor.parentWindow,
-                op=lambda col: self._fill_single_new_note(col, note, fields),
+                op=lambda col: self._update_single_new_note_proc(col, note, fields),
                 success=lambda _: editor.loadNoteKeepingFocus(),
             )
             qop \
-                .with_progress(_("Filling the dictionary entry")) \
+                .with_progress(_("Updating the note")) \
                 .failure(lambda e: _handle_failure(editor, e)) \
                 .run_in_background()
 
-    def _fetch_and_fill_all(self, editor: Editor, fields: Optional[set[str]] = None):
+    def _update_model(self, editor: Editor, fields: Optional[set[str]] = None):
         if not aqt.utils.askUser(
             text=_("Are you sure you want to perform a mass operation?"),
             parent=editor.parentWindow,
@@ -305,11 +369,25 @@ class Plugin:
         model_id: NotetypeId = notetype["id"]
         op = CollectionOp(
             parent=editor.parentWindow,
-            op=lambda col: self._fill_model_notes(col, model_id, fields),
+            op=lambda col: self._update_model_notes_proc(col, model_id, fields),
         )
         op \
             .failure(lambda e: _handle_failure(editor, e)) \
             .run_in_background()
+
+    def _update_current(self, editor: Editor):
+        if editor.currentField is None:
+            return
+        assert editor.note is not None
+        field = editor.note.keys()[editor.currentField]
+        self._update(editor, set([field]))
+
+    def _update_current_model(self, editor: Editor):
+        if editor.currentField is None:
+            return
+        assert editor.note is not None
+        field = editor.note.keys()[editor.currentField]
+        self._update_model(editor, set([field]))
 
 
 plugin = Plugin()

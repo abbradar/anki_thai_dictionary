@@ -1,10 +1,12 @@
 from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 import html
+import re
 from copy import copy
 
 from .types import *
 from .fetch import DictionaryFetcher, EntryNotFound
+from .refs import parse_any_ref, ref_to_string
 
 
 def escape_quoted_search(s: str) -> str:
@@ -19,6 +21,73 @@ def join_nonempty_strings(strs: Iterable[str], sep: str = "<br><br>"):
     return sep.join((str for str in strs if str != ""))
 
 
+@dataclass
+class ClozeRef:
+    ref: EntryRef
+    make_card: bool = False
+    capitalized: bool = False
+
+
+def parse_any_cloze_ref(fetcher: DictionaryFetcher, raw_ref: str) -> Optional[ClozeRef]:
+    capitalized = False
+    if raw_ref.startswith("!"):
+        capitalized = True
+        raw_ref = raw_ref[1:]
+    make_card = False
+    if raw_ref.startswith("@"):
+        make_card = True
+        raw_ref = raw_ref[1:]
+    refs = parse_any_ref(fetcher, raw_ref)
+    if len(refs) == 0:
+        return None
+    else:
+        ret = ClozeRef(ref=refs[0], capitalized=capitalized, make_card=make_card)
+        return ret
+
+
+def cloze_ref_to_string(ref: ClozeRef) -> str:
+    ret = ref_to_string(ref.ref)
+    if ref.make_card:
+        ret = "@" + ret
+    if ref.capitalized:
+        ret = "!" + ret
+    return ret
+
+
+@dataclass
+class Cloze:
+    id: int
+    contents: str
+    hint: Optional[str] = None
+
+
+def format_cloze(cloze: Cloze) -> str:
+    if cloze.hint is not None:
+        return f"{{{{c{cloze.id}::{cloze.contents}::{cloze.hint}}}}}"
+    else:
+        return f"{{{{c{cloze.id}::{cloze.contents}}}}}"
+
+
+# TODO: We need a proper CFG parser to support nested clozes.
+_CLOZE_REGEX = re.compile(r"\{\{c(?P<id>[0-9]+)::(?P<contents>[^}:]*)(?:::(?P<hint>[^}]*))?\}\}")
+
+def replace_cloze(callback: Callable[[Cloze], Union[Cloze, str]], cloze: str) -> str:
+    def apply(m: re.Match) -> str:
+        try:
+            id = int(m["id"])
+        except ValueError:
+            return m[0]
+
+        old_cloze = Cloze(id, m["contents"], m["hint"])
+        new_cloze = callback(old_cloze)
+        if isinstance(new_cloze, Cloze):
+            return format_cloze(new_cloze)
+        else:
+            return new_cloze
+
+    return _CLOZE_REGEX.sub(apply, cloze)
+
+
 MediaPath = str
 MediaName = str
 
@@ -30,6 +99,14 @@ class WordNote:
     ref: EntryRef
     word: str
     definition: str
+    extra: str = ""
+    media: dict[MediaName, MediaPath] = field(default_factory=dict)
+
+
+@dataclass
+class ClozeNote:
+    id_cloze: str
+    cloze: str
     extra: str = ""
     media: dict[MediaName, MediaPath] = field(default_factory=dict)
 
@@ -121,41 +198,51 @@ class NoteFormatter:
         nbsps = (2 * component.level) * "&nbsp;"
         return f"{nbsps}{component_word}: {component_defn}"
 
-    def build_components(self, entry: DictionaryEntry, *, visited: Optional[set[EntryRef]] = None, level=0) -> Generator[WordComponent, None, None]:
+    def _build_component(self, ref: EntryRef, component: DictionaryEntry, visited: set[EntryRef], level: int) -> Generator[WordComponent, None, None]:
+        defn = ref.definition
+        if defn is None:
+            defn = component.first_definition
+        comp_ref = EntryRef(component.id, defn)
+
+        if comp_ref in visited:
+            return
+
+        if component.definitions[defn].super_entry is not None:
+            comp_entry = self._fetcher.get_super_entry(component, defn)
+        else:
+            comp_entry = component
+
+        yield WordComponent(
+            id=component.id,
+            definition=defn,
+            entry=comp_entry,
+            level=level,
+        )
+        visited.add(comp_ref)
+        yield from self._build_components(comp_entry, visited, level + 1)
+
+    def build_component(self, ref: EntryRef, component: DictionaryEntry, *, visited: Optional[set[EntryRef]] = None) -> Generator[WordComponent, None, None]:
+        if visited is None:
+            visited = set()
+        return self._build_component(ref, component, visited, 0)
+
+    def _build_components(self, entry: DictionaryEntry, visited: set[EntryRef], level: int) -> Generator[WordComponent, None, None]:
         components = (defn for defn in entry.definitions.values() if defn.components is not None and defn.super_entry is None)
         try:
             comp_defn = next(components)
         except StopIteration:
             return
         assert comp_defn.components is not None
-        if visited is None:
-            visited = set()
         for rel_component in comp_defn.components:
             if rel_component == SELF_REFERENCE or rel_component.id == entry.id:
                 continue
             component = self.fetcher.get_entry(rel_component.id)
+            yield from self._build_component(rel_component, component, visited, level)
 
-            defn = rel_component.definition
-            if defn is None:
-                defn = component.first_definition
-            comp_ref = EntryRef(component.id, defn)
-
-            if comp_ref in visited:
-                continue
-
-            if component.definitions[defn].super_entry is not None:
-                comp_entry = self._fetcher.get_super_entry(component, defn)
-            else:
-                comp_entry = component
-
-            yield WordComponent(
-                id=component.id,
-                definition=defn,
-                entry=comp_entry,
-                level=level,
-            )
-            visited.add(comp_ref)
-            yield from self.build_components(comp_entry, visited=visited, level=level + 1)
+    def build_components(self, entry: DictionaryEntry, *, visited: Optional[set[EntryRef]] = None) -> Generator[WordComponent, None, None]:
+        if visited is None:
+            visited = set()
+        return self._build_components(entry, visited, 0)
 
     def format_extra_field(self, entry: DictionaryEntry) -> str:
         components = list(self.build_components(entry))
@@ -188,12 +275,12 @@ class NoteFormatter:
                 pronounciation_parts.append(comp_entry.pronounciations[name])
         return " ".join(pronounciation_parts)
 
-    def entry_to_note(self, ref: EntryRef) -> WordNote:
+    def _ref_to_entry(self, ref: EntryRef) -> tuple[EntryRef, DictionaryEntry]:
         entry = self.fetcher.get_entry(ref.id)
         new_ref = EntryRef(entry.id, ref.definition)
 
         if ref.definition is None:
-            return self._entry_to_note(new_ref, entry)
+            return new_ref, entry
         else:
             # Build a virtual definition.
             try:
@@ -205,10 +292,10 @@ class NoteFormatter:
                 new_entry.definitions = {id: defn for id, defn in entry.definitions.items() if id == ref.definition}
             else:
                 new_entry = self._fetcher.get_super_entry(entry, ref.definition)
-            return self._entry_to_note(new_ref, new_entry)
+            return new_ref, new_entry
 
-
-    def _entry_to_note(self, ref: EntryRef, entry: DictionaryEntry) -> WordNote:
+    def entry_to_note(self, ref: EntryRef) -> WordNote:
+        real_ref, entry = self._ref_to_entry(ref)
         self._media.clear()
         word_str = self.format_word_field(entry)
         definition_str = self.format_definition_field(entry)
@@ -217,9 +304,57 @@ class NoteFormatter:
         self._media.clear()
 
         return WordNote(
-            ref=ref,
+            ref=real_ref,
             word=word_str,
             definition=definition_str,
             extra=extra_str,
             media=media,
+        )
+
+    def format_cloze_extra_field(self, entries: list[tuple[EntryRef, DictionaryEntry]]) -> str:
+        visited: set[EntryRef] = set()
+        components = (comp for ref, entry in entries for comp in self.build_component(ref, entry, visited=visited))
+        components_str = "<br>".join(map(self.format_component, components))
+        return components_str
+
+    def cloze_to_note(self, raw_id_cloze: str) -> ClozeNote:
+        entries: list[tuple[EntryRef, DictionaryEntry]] = []
+        def parse_entries_ids(cloze: Cloze) -> Cloze:
+            nonlocal entries
+            ref = parse_any_cloze_ref(self._fetcher, cloze.contents)
+            if ref is None:
+                return cloze
+            real_ref, entry = self._ref_to_entry(ref.ref)
+            entries.append((real_ref, entry))
+            new_cloze = dataclasses.replace(ref, ref=real_ref)
+            new_contents = cloze_ref_to_string(new_cloze)
+            return dataclasses.replace(cloze, contents=new_contents)
+
+        # First, normalize to ids.
+        id_cloze = replace_cloze(parse_entries_ids, raw_id_cloze)
+
+        cloze_counter = 1
+        def emit_pronounciations(content: Cloze) -> Union[Cloze, str]:
+            nonlocal cloze_counter
+            # We only expect normalized references here.
+            ref = parse_any_cloze_ref(self._fetcher, content.contents)
+            if ref is None:
+                return content
+            _real_ref, entry = self._ref_to_entry(ref.ref)
+            word = self.format_word(entry)
+            if ref.capitalized:
+                word = word.capitalize()
+            if ref.make_card:
+                id = cloze_counter
+                cloze_counter += 1
+                return Cloze(id, word, content.hint)
+            else:
+                return word
+
+        cloze = replace_cloze(emit_pronounciations, id_cloze)
+        extra_str = self.format_cloze_extra_field(entries)
+        return ClozeNote(
+            id_cloze=id_cloze,
+            cloze=cloze,
+            extra=extra_str,
         )

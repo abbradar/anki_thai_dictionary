@@ -2,12 +2,13 @@ from copy import copy
 import re
 import logging
 from itertools import islice
-from typing import Any, Generator, Optional, cast
+from typing import Any, Generator, Optional
 from urllib.parse import urljoin
-import requests
-from bs4 import BeautifulSoup, NavigableString, Tag
 import json
 import sqlite3
+import unicodedata
+import requests
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .utils import norecurse
 from .types import *
@@ -47,22 +48,22 @@ def _get_first(tag: Tag, *args, **kwargs) -> Tag:
     return r
 
 
-_ENTRY_URL_REGEX = re.compile(r"(?:(?:https?://(?:www\.)?thai-language\.com)?/id/([0-9]+))?(?:#def([0-9]+[^?]*))?")
+_ENTRY_URL_REGEX = re.compile(r"(?:(?:https?://(?:www\.)?thai-language\.com)?/id/(?P<id>[0-9]+))?(?:#def(?P<def>[0-9]+[^?]*))?")
 
 def parse_entry_url(url: str, self_id: Optional[EntryId] = None) -> Optional[EntryRef]:
     m = _ENTRY_URL_REGEX.fullmatch(url)
     if m is None:
         return None
     else:
-        if m[1] is None:
+        if m["id"] is None:
             if self_id is None:
                 return None
             id = self_id
         else:
-            id = int(m[1])
+            id = int(m["id"])
         return EntryRef(
             id=id,
-            definition=m[2],
+            definition=m["def"],
         )
 
 def build_entry_url(ref: EntryRef) -> str:
@@ -370,7 +371,7 @@ class DictionaryFetcher:
     _cache_db: sqlite3.Connection
     _session_initialized = False
 
-    CACHE_VERSION = 1
+    CACHE_VERSION = 3
 
     def __init__(self, *, cache_database: Optional[str]=None):
         self._session = requests.Session()
@@ -498,15 +499,17 @@ class DictionaryFetcher:
 
     def _cache_entry(self, ref: EntryRef, entry: DictionaryEntry):
         for type, pronounciation in entry.pronounciations.items():
+            pronounciation = unicodedata.normalize("NFC", pronounciation)
             try:
                 self._cache_db.execute("INSERT INTO pronounciations (pronounciation, type, entry_id, definition_id) VALUES (?, ?, ?, ?)", (pronounciation, type, ref.id, ref.definition))
             except Exception as e:
                 logger.warn(f"Failed to add {type} pronounciation {pronounciation} for {ref.id}{f'#{ref.definition}' if ref.definition is not None else ''} into the cache", exc_info=e)
 
+        word = unicodedata.normalize("NFC", entry.entry)
         try:
-            self._cache_db.execute("INSERT INTO words (word, entry_id, definition_id) VALUES (?, ?, ?)", (entry.entry, ref.id, ref.definition))
+            self._cache_db.execute("INSERT INTO words (word, entry_id, definition_id) VALUES (?, ?, ?)", (word, ref.id, ref.definition))
         except Exception as e:
-            logger.warn(f"Failed to add word for {ref.id}{f'#{ref.definition}' if ref.definition is not None else ''} into the cache", exc_info=e)
+            logger.warn(f"Failed to add word {word} for {ref.id}{f'#{ref.definition}' if ref.definition is not None else ''} into the cache", exc_info=e)
 
     def get_entry(self, id: EntryId) -> DictionaryEntry:
         for real_id, in self._cache_db.execute("SELECT entry_id FROM redirects WHERE id = ?", (id,)):
@@ -568,14 +571,26 @@ class DictionaryFetcher:
             logger.warn(f"Failed to add media file {path} into the cache", exc_info=e)
         return blob
 
-    def lookup_pronounciation(self, pronounciation: str) -> Optional[EntryId]:
-        for entry_id, in self._cache_db.execute("SELECT entry_id FROM pronounciations WHERE pronounciation = ?", (pronounciation,)):
-            return entry_id
-        return None
+    def lookup_pronounciation(self, pronounciation: str) -> list[EntryId]:
+        pronounciation = unicodedata.normalize("NFC", pronounciation.lower())
+        # TODO: Implement server-side search.
+        return [
+            entry_id
+            for entry_id,
+            in self._cache_db.execute("SELECT entry_id FROM pronounciations WHERE pronounciation = ?", (pronounciation,))
+        ]
 
-    def lookup_word(self, word: str) -> Optional[EntryRef]:
-        for entry_id, defn in self._cache_db.execute("SELECT entry_id, definition_id FROM words WHERE word = ?", (word,)):
-            return EntryRef(entry_id, defn)
+    def lookup_word(self, word: str, force_serverside=False) -> list[EntryRef]:
+        word = unicodedata.normalize("NFC", word.lower())
+
+        if not force_serverside:
+            local_ret = [
+                EntryRef(entry_id, defn)
+                for entry_id, defn
+                in self._cache_db.execute("SELECT entry_id, definition_id FROM words WHERE word = ?", (word,))
+            ]
+            if len(local_ret) > 0:
+                return local_ret
 
         data = {"tmode": 0, "emode": 0, "search": word}
         r = self._session.post(
@@ -586,10 +601,10 @@ class DictionaryFetcher:
         r.raise_for_status()
 
         if r.status_code != 302:
-            return None
+            return []
         else:
             ref = parse_entry_url(r.headers["Location"])
             if ref is None:
                 raise RuntimeError("Unexpected missing Location")
             entry = self.get_entry(ref.id)
-            return EntryRef(entry.id, ref.definition)
+            return [EntryRef(entry.id, ref.definition)]
