@@ -1,4 +1,5 @@
 from typing import Optional
+from anki.utils import strip_html
 
 from .types import *
 from .fetch import DictionaryFetcher, parse_entry_url
@@ -21,6 +22,7 @@ def ref_to_string(ref: EntryRef) -> str:
 
 
 def parse_any_ref(fetcher: DictionaryFetcher, raw_ref: str) -> list[EntryRef]:
+    raw_ref = strip_html(raw_ref).strip()
     if raw_ref == "":
         return []
 

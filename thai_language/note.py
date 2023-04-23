@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import html
 import re
 from copy import copy
+from typing import cast
 
 from .types import *
 from .fetch import DictionaryFetcher, EntryNotFound
@@ -22,36 +23,37 @@ def join_nonempty_strings(strs: Iterable[str], sep: str = "<br><br>"):
 
 
 @dataclass
-class ClozeRef:
+class InlineRef:
     ref: EntryRef
-    make_card: bool = False
     capitalized: bool = False
 
 
-def parse_any_cloze_ref(fetcher: DictionaryFetcher, raw_ref: str) -> Optional[ClozeRef]:
-    capitalized = False
-    if raw_ref.startswith("!"):
-        capitalized = True
-        raw_ref = raw_ref[1:]
-    make_card = False
-    if raw_ref.startswith("@"):
-        make_card = True
-        raw_ref = raw_ref[1:]
-    refs = parse_any_ref(fetcher, raw_ref)
-    if len(refs) == 0:
-        return None
-    else:
-        ret = ClozeRef(ref=refs[0], capitalized=capitalized, make_card=make_card)
-        return ret
-
-
-def cloze_ref_to_string(ref: ClozeRef) -> str:
+def format_inline_ref(ref: InlineRef) -> str:
     ret = ref_to_string(ref.ref)
-    if ref.make_card:
-        ret = "@" + ret
     if ref.capitalized:
         ret = "!" + ret
-    return ret
+    return "[[" + ret + "]]"
+
+
+_INLINE_REF_REGEX = re.compile(r"\[\[(?P<capitalized>!)?(?P<contents>[^]]*)\]\]")
+
+def replace_inline_refs(fetcher: DictionaryFetcher, callback: Callable[[InlineRef], str], inline_refs: str) -> str:
+    def apply(m: re.Match) -> str:
+        contents = cast(str, m["contents"])
+        refs = parse_any_ref(fetcher, contents)
+        if len(refs) == 0:
+            return m[0]
+        else:
+            capitalized = m["capitalized"] is not None
+            if contents[0].isupper():
+                capitalized = True
+            inline_ref = InlineRef(
+                ref=refs[0],
+                capitalized=capitalized,
+            )
+            return callback(inline_ref)
+
+    return _INLINE_REF_REGEX.sub(apply, inline_refs)
 
 
 @dataclass
@@ -62,30 +64,10 @@ class Cloze:
 
 
 def format_cloze(cloze: Cloze) -> str:
+    ret = f"c{cloze.id}::{cloze.contents}"
     if cloze.hint is not None:
-        return f"{{{{c{cloze.id}::{cloze.contents}::{cloze.hint}}}}}"
-    else:
-        return f"{{{{c{cloze.id}::{cloze.contents}}}}}"
-
-
-# TODO: We need a proper CFG parser to support nested clozes.
-_CLOZE_REGEX = re.compile(r"\{\{c(?P<id>[0-9]+)::(?P<contents>[^}:]*)(?:::(?P<hint>[^}]*))?\}\}")
-
-def replace_cloze(callback: Callable[[Cloze], Union[Cloze, str]], cloze: str) -> str:
-    def apply(m: re.Match) -> str:
-        try:
-            id = int(m["id"])
-        except ValueError:
-            return m[0]
-
-        old_cloze = Cloze(id, m["contents"], m["hint"])
-        new_cloze = callback(old_cloze)
-        if isinstance(new_cloze, Cloze):
-            return format_cloze(new_cloze)
-        else:
-            return new_cloze
-
-    return _CLOZE_REGEX.sub(apply, cloze)
+        ret = ret + f"::{cloze.hint}"
+    return "{{" + ret + "}}"
 
 
 MediaPath = str
@@ -105,7 +87,7 @@ class WordNote:
 
 @dataclass
 class ClozeNote:
-    id_cloze: str
+    inline_ids: str
     cloze: str
     extra: str = ""
     media: dict[MediaName, MediaPath] = field(default_factory=dict)
@@ -317,44 +299,29 @@ class NoteFormatter:
         components_str = "<br>".join(map(self.format_component, components))
         return components_str
 
-    def cloze_to_note(self, raw_id_cloze: str) -> ClozeNote:
+    def cloze_to_note(self, raw_inline_ids: str) -> ClozeNote:
         entries: list[tuple[EntryRef, DictionaryEntry]] = []
-        def parse_entries_ids(cloze: Cloze) -> Cloze:
+        def parse_entries_ids(inline_ref: InlineRef) -> str:
             nonlocal entries
-            ref = parse_any_cloze_ref(self._fetcher, cloze.contents)
-            if ref is None:
-                return cloze
-            real_ref, entry = self._ref_to_entry(ref.ref)
+            real_ref, entry = self._ref_to_entry(inline_ref.ref)
             entries.append((real_ref, entry))
-            new_cloze = dataclasses.replace(ref, ref=real_ref)
-            new_contents = cloze_ref_to_string(new_cloze)
-            return dataclasses.replace(cloze, contents=new_contents)
+            new_inline_ref = dataclasses.replace(inline_ref, ref=real_ref)
+            return format_inline_ref(new_inline_ref)
 
         # First, normalize to ids.
-        id_cloze = replace_cloze(parse_entries_ids, raw_id_cloze)
+        inline_ids = replace_inline_refs(self._fetcher, parse_entries_ids, raw_inline_ids)
 
-        cloze_counter = 1
-        def emit_pronounciations(content: Cloze) -> Union[Cloze, str]:
-            nonlocal cloze_counter
-            # We only expect normalized references here.
-            ref = parse_any_cloze_ref(self._fetcher, content.contents)
-            if ref is None:
-                return content
-            _real_ref, entry = self._ref_to_entry(ref.ref)
+        def emit_pronounciations(inline_ref: InlineRef) -> str:
+            _real_ref, entry = self._ref_to_entry(inline_ref.ref)
             word = self.format_word(entry)
-            if ref.capitalized:
+            if inline_ref.capitalized:
                 word = word.capitalize()
-            if ref.make_card:
-                id = cloze_counter
-                cloze_counter += 1
-                return Cloze(id, word, content.hint)
-            else:
-                return word
+            return word
 
-        cloze = replace_cloze(emit_pronounciations, id_cloze)
+        cloze = replace_inline_refs(self._fetcher, emit_pronounciations, inline_ids)
         extra_str = self.format_cloze_extra_field(entries)
         return ClozeNote(
-            id_cloze=id_cloze,
+            inline_ids=inline_ids,
             cloze=cloze,
             extra=extra_str,
         )

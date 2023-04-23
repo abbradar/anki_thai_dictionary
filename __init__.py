@@ -9,7 +9,6 @@ from functools import cached_property
 from gettext import gettext as _
 from threading import Lock
 
-from anki.utils import strip_html
 from anki.notes import Note
 from anki.models import NotetypeId
 from anki.collection import Collection
@@ -147,7 +146,7 @@ class Plugin:
         qconnect(action.triggered, lambda: self._fetch_model(editor))
 
     def _fetch_entry_note(self, col: Collection, note: Note) -> AnkiWordNote:
-        raw_id = strip_html(note[self._config.id_field]).strip()
+        raw_id = note[self._config.id_field]
 
         with self._fetcher_lock:
             formatter = NoteFormatter(self._fetcher, pronounciation_type=self._config.pronounciation_type)
@@ -197,7 +196,7 @@ class Plugin:
         if on_fetch:
             on_fetch()
 
-        note[self._config.cloze_ids_field] = cloze_note.id_cloze
+        note[self._config.cloze_ids_field] = cloze_note.inline_ids
         if self._config.cloze_text_field in note and (fields is None or self._config.cloze_text_field in fields):
             note[self._config.cloze_text_field] = cloze_note.cloze
         if self._config.cloze_extra_field in note and (fields is None or self._config.cloze_extra_field in fields):
