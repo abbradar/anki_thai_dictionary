@@ -561,9 +561,12 @@ class DictionaryFetcher:
         except Exception as e:
             raise RuntimeError(f"Failed to get media file {path}") from e
 
-    def get_media_data(self, path: str) -> bytes:
-        for raw_data, in self._cache_db.execute("SELECT data FROM media WHERE path = ?", (path,)):
-            return raw_data
+    def get_media_data(self, path: str, force_serverside=False) -> bytes:
+        if force_serverside:
+            self._cache_db.execute("DELETE FROM media WHERE path = ?", (path,))
+        else:
+            for raw_data, in self._cache_db.execute("SELECT data FROM media WHERE path = ?", (path,)):
+                return raw_data
         blob = self._get_media_data(path)
         try:
             self._cache_db.execute("INSERT INTO media (path, data) VALUES (?, ?)", (path, blob))
