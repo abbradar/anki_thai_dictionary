@@ -180,7 +180,7 @@ class NoteFormatter:
         nbsps = (2 * component.level) * "&nbsp;"
         return f"{nbsps}{component_word}: {component_defn}"
 
-    def _build_component(self, ref: EntryRef, component: DictionaryEntry, visited: set[EntryRef], level: int) -> Generator[WordComponent, None, None]:
+    def _build_component(self, ref: EntryRef, component: DictionaryEntry, visited: set[EntryRef], level: int, emit_subcomponents=True) -> Generator[WordComponent, None, None]:
         defn = ref.definition
         if defn is None:
             defn = component.first_definition
@@ -201,7 +201,8 @@ class NoteFormatter:
             level=level,
         )
         visited.add(comp_ref)
-        yield from self._build_components(comp_entry, visited, level + 1)
+        if emit_subcomponents:
+            yield from self._build_components(comp_entry, visited, level + 1)
 
     def build_component(self, ref: EntryRef, component: DictionaryEntry, *, visited: Optional[set[EntryRef]] = None) -> Generator[WordComponent, None, None]:
         if visited is None:
@@ -216,10 +217,10 @@ class NoteFormatter:
             return
         assert comp_defn.components is not None
         for rel_component in comp_defn.components:
-            if rel_component == SELF_REFERENCE or rel_component.id == entry.id:
-                continue
+            if rel_component == SELF_REFERENCE:
+                rel_component = EntryRef(id=entry.id)
             component = self.fetcher.get_entry(rel_component.id)
-            yield from self._build_component(rel_component, component, visited, level)
+            yield from self._build_component(rel_component, component, visited, level, emit_subcomponents=rel_component.id != entry.id)
 
     def build_components(self, entry: DictionaryEntry, *, visited: Optional[set[EntryRef]] = None) -> Generator[WordComponent, None, None]:
         if visited is None:

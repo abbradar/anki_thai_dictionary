@@ -145,6 +145,12 @@ class Plugin:
         action = menu.addAction(_("Cache all notes"))
         qconnect(action.triggered, lambda: self._fetch_model(editor))
 
+        action = menu.addAction(_("Verify the media"))
+        qconnect(action.triggered, lambda: self._verify_media(editor))
+
+        action = menu.addAction(_("Verify all the media"))
+        qconnect(action.triggered, lambda: self._verify_media_model(editor))
+
     def _fetch_entry_note(self, col: Collection, note: Note) -> AnkiWordNote:
         raw_id = note[self._config.id_field]
 
@@ -155,15 +161,15 @@ class Plugin:
                 raise AnkiEntryNotFound()
             try:
                 word_note = formatter.entry_to_note(refs[0])
-
-                media_data: dict[MediaName, bytes] = {}
-                for name, path in word_note.media.items():
-                    if not col.media.have(name):
-                        file_data = self._fetcher.get_media_data(path)
-                        media_data[name] = file_data
-                return AnkiWordNote(**word_note.__dict__, media_data=media_data)
             except EntryNotFound:
                 raise AnkiEntryNotFound()
+
+            media_data: dict[MediaName, bytes] = {}
+            for name, path in word_note.media.items():
+                if not col.media.have(name):
+                    file_data = self._fetcher.get_media_data(path)
+                    media_data[name] = file_data
+            return AnkiWordNote(**word_note.__dict__, media_data=media_data)
 
     def _update_entry_note(self, col: Collection, note: Note, *, fields: Optional[set[str]] = None, on_fetch: Optional[Callable[[], None]] = None):
         word_note = self._fetch_entry_note(col, note)
@@ -240,7 +246,7 @@ class Plugin:
                 note_type = self._get_note_type(note)
             mw.taskman.run_on_main(
                 lambda: mw.progress.update(
-                    label=_("Updating note {} of {}").format(i + 1, total),
+                    label=_("Fetching note {} of {}").format(i + 1, total),
                     value=i,
                     max=total,
                 )
@@ -303,6 +309,64 @@ class Plugin:
                 pass
         col.update_notes(processed_notes)
         return col.merge_undo_entries(pos)
+
+    def _verify_entry_media(self, col: Collection, note: Note):
+        raw_id = note[self._config.id_field]
+
+        with self._fetcher_lock:
+            formatter = NoteFormatter(self._fetcher, pronounciation_type=self._config.pronounciation_type)
+            refs = parse_any_ref(self._fetcher, raw_id)
+            if len(refs) == 0:
+                raise AnkiEntryNotFound()
+            try:
+                word_note = formatter.entry_to_note(refs[0])
+            except EntryNotFound:
+                raise AnkiEntryNotFound()
+
+            for name, path in word_note.media.items():
+                file_data = self._fetcher.get_media_data(path, verify=True)
+                if col.media.have(name):
+                    col.media.trash_files([name])
+                new_name = col.media.write_data(name, file_data)
+                assert name == new_name
+
+    def _verify_media_note(self, col: Collection, note: Note, type: NoteType):
+        if type == NoteType.ENTRY:
+            self._verify_entry_media(col, note)
+
+    def _verify_media_proc(self, col: Collection, note: Note):
+        assert aqt.mw is not None
+        mw = aqt.mw
+        type = self._get_note_type(note)
+        self._verify_media_note(col, note, type)
+
+    def _verify_model_media_proc(self, col: Collection, model_id: NotetypeId):
+        assert aqt.mw is not None
+        mw = aqt.mw
+
+        mw.taskman.run_on_main(
+            lambda: mw.progress.update(
+                label=_("Searching for model notes"),
+            )
+        )
+        all_nids = col.models.nids(model_id)
+        total = len(all_nids)
+        note_type = None
+        for i, note_id in enumerate(all_nids):
+            note = col.get_note(note_id)
+            if note_type is None:
+                note_type = self._get_note_type(note)
+            mw.taskman.run_on_main(
+                lambda: mw.progress.update(
+                    label=_("Verifying note {} of {}").format(i + 1, total),
+                    value=i,
+                    max=total,
+                )
+            )
+            try:
+                self._verify_media_note(col, note, note_type)
+            except AnkiEntryNotFound:
+                pass
 
     def _fetch(self, editor: Editor):
         assert editor.note is not None
@@ -387,6 +451,40 @@ class Plugin:
         assert editor.note is not None
         field = editor.note.keys()[editor.currentField]
         self._update_model(editor, set([field]))
+
+    def _verify_media(self, editor: Editor):
+        assert editor.note is not None
+        note = editor.note
+        qop = QueryOp(
+            parent=editor.parentWindow,
+            op=lambda col: self._verify_media_proc(col, note),
+            success=lambda _: None,
+        )
+        qop \
+            .with_progress(_("Verifying the note media")) \
+            .failure(lambda e: _handle_failure(editor, e)) \
+            .run_in_background()
+
+    def _verify_media_model(self, editor: Editor):
+        if not aqt.utils.askUser(
+            text=_("Are you sure you want to perform a mass operation?"),
+            parent=editor.parentWindow,
+            defaultno=True,
+        ):
+            return
+        assert editor.note is not None
+        notetype = editor.note.note_type()
+        assert notetype is not None
+        model_id: NotetypeId = notetype["id"]
+        qop = QueryOp(
+            parent=editor.parentWindow,
+            op=lambda col: self._verify_model_media_proc(col, model_id),
+            success=lambda _: None,
+        )
+        qop \
+            .with_progress(_("Verifying the note media")) \
+            .failure(lambda e: _handle_failure(editor, e)) \
+            .run_in_background()
 
 
 plugin = Plugin()

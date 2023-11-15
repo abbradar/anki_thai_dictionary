@@ -4,6 +4,7 @@ import logging
 from itertools import islice
 from typing import Any, Generator, Optional
 from urllib.parse import urljoin
+import hashlib
 import json
 import sqlite3
 import unicodedata
@@ -371,7 +372,7 @@ class DictionaryFetcher:
     _cache_db: sqlite3.Connection
     _session_initialized = False
 
-    CACHE_VERSION = 3
+    CACHE_VERSION = 4
 
     def __init__(self, *, cache_database: Optional[str]=None):
         self._session = requests.Session()
@@ -395,7 +396,8 @@ class DictionaryFetcher:
         self._cache_db.execute("""
             CREATE TABLE IF NOT EXISTS media (
                 path TEXT PRIMARY KEY,
-                data BLOB NOT NULL
+                data BLOB NOT NULL,
+                sha256 TEXT NOT NULL
             ) STRICT
         """)
         self._cache_db.execute("""
@@ -557,22 +559,43 @@ class DictionaryFetcher:
             url = urljoin(BASE_URL, path)
             r = self._session.get(url)
             r.raise_for_status()
-            return r.content
+            hasher = hashlib.sha256()
+            hasher.update(r.content)
+            return hasher.hexdigest(), r.content
         except Exception as e:
             raise RuntimeError(f"Failed to get media file {path}") from e
 
-    def get_media_data(self, path: str, force_serverside=False) -> bytes:
-        if force_serverside:
-            self._cache_db.execute("DELETE FROM media WHERE path = ?", (path,))
-        else:
-            for raw_data, in self._cache_db.execute("SELECT data FROM media WHERE path = ?", (path,)):
-                return raw_data
-        blob = self._get_media_data(path)
-        try:
-            self._cache_db.execute("INSERT INTO media (path, data) VALUES (?, ?)", (path, blob))
-        except Exception as e:
-            logger.warn(f"Failed to add media file {path} into the cache", exc_info=e)
-        return blob
+    def get_media_data(self, path: str, verify=False) -> bytes:
+        has_existing = False
+        insert_new = True
+        sha256: Optional[str] = None
+        data: Optional[bytes] = None
+
+        for existing_sha256, existing_data in self._cache_db.execute("SELECT sha256, data FROM media WHERE path = ?", (path,)):
+            has_existing = True
+            insert_new = False
+            sha256 = existing_sha256
+            data = existing_data
+
+        if sha256 is None:
+            sha256, data = self._get_media_data(path)
+
+        verified = not verify
+        while not verified:
+            new_sha256, new_data = self._get_media_data(path)
+            verified = sha256 == new_sha256
+            insert_new = insert_new or not verified
+            sha256, data = new_sha256, new_data
+
+        assert data is not None
+        if insert_new:
+            try:
+                if has_existing:
+                    self._cache_db.execute("DELETE FROM media WHERE path = ?", (path,))
+                self._cache_db.execute("INSERT INTO media (path, sha256, data) VALUES (?, ?, ?)", (path, sha256, data))
+            except Exception as e:
+                logger.warn(f"Failed to add media file {path} into the cache", exc_info=e)
+        return data
 
     def lookup_pronounciation(self, pronounciation: str) -> list[EntryId]:
         pronounciation = unicodedata.normalize("NFC", pronounciation.lower())
