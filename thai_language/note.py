@@ -149,11 +149,19 @@ class NoteFormatter:
             raise RuntimeError("No suitable definitions found")
         return defns
 
-    def format_word(self, entry: DictionaryEntry) -> str:
+    def format_pronounciation(self, entry: DictionaryEntry) -> str:
         return html.escape(entry.pronounciations[self.pronounciation_type].replace(" ", "-"))
 
+    def format_inline_word(self, entry: DictionaryEntry) -> str:
+        pronounciation = self.format_pronounciation(entry)
+        entry_str = html.escape(entry.entry)
+        return f"<ruby>{entry_str}<rt>{pronounciation}</rt></ruby>"
+
     def format_word_field(self, entry: DictionaryEntry) -> str:
-        word_str = self.format_word(entry)
+        pronounciation = self.format_pronounciation(entry)
+        entry_str = html.escape(entry.entry)
+        word_str = f"{entry_str}[{pronounciation}]"
+
         if entry.sound_url is not None:
             sound_file = self.use_media(entry.sound_url)
             word_str += f' [sound:{sound_file}]'
@@ -175,7 +183,7 @@ class NoteFormatter:
         return html.escape(entry.definitions[defn].definition)
 
     def format_component(self, component: WordComponent) -> str:
-        component_word = self.format_word(component.entry)
+        component_word = self.format_inline_word(component.entry)
         component_defn = self.format_definition(component.entry, component.definition)
         nbsps = (2 * component.level) * "&nbsp;"
         return f"{nbsps}{component_word}: {component_defn}"
@@ -237,7 +245,7 @@ class NoteFormatter:
             classifier_str = ""
         else:
             classifier_entry = self.fetcher.get_entry(classifier_ref.id)
-            classifier_word = self.format_word(classifier_entry)
+            classifier_word = self.format_inline_word(classifier_entry)
             classifier_defn = self.format_definition(classifier_entry, classifier_ref.definition)
             classifier_str = f"Classifier: {classifier_word}"
             if classifier_defn.startswith("["):
@@ -314,7 +322,7 @@ class NoteFormatter:
 
         def emit_pronounciations(inline_ref: InlineRef) -> str:
             _real_ref, entry = self._ref_to_entry(inline_ref.ref)
-            word = self.format_word(entry)
+            word = self.format_pronounciation(entry)
             if inline_ref.capitalized:
                 word = word.capitalize()
             return word
